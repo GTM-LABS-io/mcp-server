@@ -1,721 +1,438 @@
 #!/usr/bin/env python3
 """
-GTM Labs MCP Server (Portable Version)
-Exposes website components, layouts, animations, and scaffolds via Model Context Protocol
+GTM Labs MCP Server - GitHub API Version
+Fetches components directly from GitHub (always latest, no git clone needed!)
 
-This version uses a config file to locate the GTM Labs project, making it portable.
+This version fetches files directly from GitHub's API, so users always get
+the latest components without needing to clone repos or run git pull.
 """
 
 import json
-import os
-import re
-import subprocess
+import base64
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import sys
 
 # MCP SDK imports
 try:
     from mcp.server import Server
-    from mcp.types import (
-        Resource,
-        Tool,
-        TextContent,
-        ImageContent,
-        EmbeddedResource,
-    )
+    from mcp.types import Resource, Tool, TextContent
     import mcp.server.stdio
 except ImportError:
     print("Error: MCP SDK not installed. Install with: pip install mcp", file=sys.stderr)
     sys.exit(1)
 
-# Load configuration
-def load_config():
-    """Load project path from config file"""
-    # Check for config in multiple locations
-    config_locations = [
-        Path.home() / ".gtm-labs-mcp" / "config.json",
-        Path.home() / ".config" / "gtm-labs-mcp" / "config.json",
-        Path(__file__).parent / "config.json",
-    ]
-    
-    for config_path in config_locations:
-        if config_path.exists():
-            try:
-                with open(config_path) as f:
-                    config = json.load(f)
-                return Path(config["project_root"])
-            except Exception as e:
-                print(f"Warning: Could not load config from {config_path}: {e}", file=sys.stderr)
-    
-    # Fallback: assume script is in project root
-    return Path(__file__).parent.resolve()
-
-# Project paths - Load from config
-PROJECT_ROOT = load_config()
-HOMEPAGE_ROOT = PROJECT_ROOT / "homepage"
-COMPONENTS_DIR = HOMEPAGE_ROOT / "components"
-APP_DIR = HOMEPAGE_ROOT / "app"
-LIB_DIR = HOMEPAGE_ROOT / "lib"
-
-# Verify paths exist
-if not HOMEPAGE_ROOT.exists():
-    print(f"Error: Homepage directory not found at {HOMEPAGE_ROOT}", file=sys.stderr)
-    print(f"Create a config file at ~/.gtm-labs-mcp/config.json with:", file=sys.stderr)
-    print(json.dumps({"project_root": "/path/to/your/gtm-labs-project"}, indent=2), file=sys.stderr)
+# HTTP requests
+try:
+    import requests
+except ImportError:
+    print("Error: requests not installed. Install with: pip install requests", file=sys.stderr)
     sys.exit(1)
 
-# Security: Files/patterns to EXCLUDE
-EXCLUDED_PATTERNS = [
-    r"\.env",
-    r".*secret.*",
-    r".*private.*",
-    r"personas/",
-    r"messaging/",
-    r"internal-docs/",
-    r"Deep Research/",
-    r"node_modules/",
-    r"\.git/",
-]
-
-# Security: Content to REDACT
-REDACT_PATTERNS = [
-    (r"(MyMarky|UseQueue)", "[REDACTED_TOOL]"),
-    (r"(sk-[a-zA-Z0-9]{48}|api[_-]?key[_-]?[a-zA-Z0-9]+)", "[REDACTED_KEY]"),
-]
-
-
-def should_exclude_file(file_path: Path) -> bool:
-    """Check if file should be excluded based on security rules"""
-    path_str = str(file_path)
-    for pattern in EXCLUDED_PATTERNS:
-        if re.search(pattern, path_str, re.IGNORECASE):
-            return True
-    return False
-
-
-def redact_content(content: str) -> str:
-    """Redact sensitive content from file contents"""
-    for pattern, replacement in REDACT_PATTERNS:
-        content = re.sub(pattern, replacement, content, flags=re.IGNORECASE)
-    return content
-
-
-def get_git_versions(file_path: Optional[Path] = None) -> List[Dict[str, str]]:
-    """Get all Git versions (tags and commits) for a file or entire repo"""
-    try:
-        if file_path:
-            # Get commits for specific file
-            cmd = ["git", "log", "--pretty=format:%H|%ai|%s", "--", str(file_path)]
-        else:
-            # Get all tags
-            cmd = ["git", "tag", "-l", "--format=%(refname:short)|%(creatordate:iso)|%(subject)"]
-        
-        result = subprocess.run(
-            cmd,
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        
-        versions = []
-        for line in result.stdout.strip().split("\n"):
-            if not line:
-                continue
-            parts = line.split("|")
-            if len(parts) >= 2:
-                versions.append({
-                    "version": parts[0],
-                    "date": parts[1] if len(parts) > 1 else "",
-                    "message": parts[2] if len(parts) > 2 else ""
-                })
-        return versions
-    except Exception:
-        return []
-
-
-def get_file_at_version(file_path: Path, version: str = "HEAD") -> Optional[str]:
-    """Get file contents at specific Git version"""
-    try:
-        rel_path = file_path.relative_to(PROJECT_ROOT)
-        result = subprocess.run(
-            ["git", "show", f"{version}:{rel_path}"],
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return redact_content(result.stdout)
-    except Exception:
-        return None
-
-
-def get_component_dependencies(file_path: Path) -> List[str]:
-    """Extract import dependencies from a component file"""
-    try:
-        content = file_path.read_text()
-        dependencies = []
-        
-        # Match imports from local files
-        import_pattern = r"import\s+.*?\s+from\s+['\"](@/[^'\"]+|\.+/[^'\"]+)['\"]"
-        matches = re.findall(import_pattern, content)
-        
-        for match in matches:
-            # Convert to absolute path
-            if match.startswith("@/"):
-                dep_path = HOMEPAGE_ROOT / match[2:]
-            else:
-                dep_path = (file_path.parent / match).resolve()
-            
-            dependencies.append(str(dep_path.relative_to(PROJECT_ROOT)))
-        
-        return dependencies
-    except Exception:
-        return []
-
-
-def scan_components() -> Dict[str, List[Path]]:
-    """Scan and categorize all components"""
-    categories = {
-        "sections": [],
-        "navigation": [],
-        "animations": [],
-        "ui": [],
-        "cosmic": [],
-        "magicui": [],
-        "experiments": [],
-    }
+# GitHub configuration - Supports multiple accounts!
+GITHUB_REPOS = {
+    # GTM Labs projects (GTM-LABS-io account)
+    "homepage": {"owner": "GTM-LABS-io", "repo": "gtm-homepage"},
     
-    if not COMPONENTS_DIR.exists():
-        return categories
+    # Personal projects (buildingwithai account)
+    # "personal-project": {"owner": "buildingwithai", "repo": "project-name"},
     
-    for file_path in COMPONENTS_DIR.rglob("*.tsx"):
-        if should_exclude_file(file_path):
-            continue
-        
-        rel_path = file_path.relative_to(COMPONENTS_DIR)
-        
-        # Categorize based on directory structure
-        if "cosmic" in rel_path.parts:
-            categories["cosmic"].append(file_path)
-        elif "magicui" in rel_path.parts:
-            categories["magicui"].append(file_path)
-        elif "experiments" in rel_path.parts:
-            categories["experiments"].append(file_path)
-        elif "ui" in rel_path.parts:
-            # Check if it's a section or animation
-            if "section" in file_path.stem.lower():
-                categories["sections"].append(file_path)
-            elif "animation" in file_path.stem.lower():
-                categories["animations"].append(file_path)
-            else:
-                categories["ui"].append(file_path)
-        else:
-            # Top-level components
-            if any(keyword in file_path.stem.lower() for keyword in ["nav", "header", "footer"]):
-                categories["navigation"].append(file_path)
-            else:
-                categories["ui"].append(file_path)
-    
-    return categories
+    # Add more projects as you create them:
+    # "saas": {"owner": "GTM-LABS-io", "repo": "gtm-saas-landing"},
+    # "portfolio": {"owner": "GTM-LABS-io", "repo": "gtm-portfolio"},
+}
 
+# Optional: Load GitHub token from config for higher rate limits
+def load_github_token():
+    """Load GitHub token from config if available"""
+    config_path = Path.home() / ".gtm-labs-mcp" / "config.json"
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+                return config.get("github_token")
+        except:
+            pass
+    return None
 
-def get_component_specs(file_path: Path) -> Dict[str, Any]:
-    """Extract detailed specs from component (colors, animations, sizes, etc.)"""
-    try:
-        content = file_path.read_text()
-        specs = {
-            "colors": [],
-            "animations": [],
-            "borders": [],
-            "spacing": [],
-            "fonts": []
-        }
-        
-        # Extract Tailwind classes and inline styles
-        # Colors
-        color_pattern = r"(?:bg|text|border)-(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d+"
-        specs["colors"] = list(set(re.findall(color_pattern, content)))
-        
-        # Animations
-        animation_pattern = r"animate-[\w-]+"
-        specs["animations"] = list(set(re.findall(animation_pattern, content)))
-        
-        # Border radius
-        border_pattern = r"rounded-(?:none|sm|md|lg|xl|2xl|3xl|full|\d+)"
-        specs["borders"] = list(set(re.findall(border_pattern, content)))
-        
-        # Spacing (padding, margin)
-        spacing_pattern = r"(?:p|m|px|py|pl|pr|pt|pb|mx|my|ml|mr|mt|mb)-\d+"
-        specs["spacing"] = list(set(re.findall(spacing_pattern, content)))
-        
-        # Font sizes
-        font_pattern = r"text-(?:xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|8xl|9xl)"
-        specs["fonts"] = list(set(re.findall(font_pattern, content)))
-        
-        return specs
-    except Exception:
-        return {}
+GITHUB_TOKEN = load_github_token()
 
-
-# Initialize MCP Server
+# Initialize MCP server
 app = Server("gtm-labs")
 
+def github_request(url: str) -> requests.Response:
+    """Make a request to GitHub API with optional authentication"""
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+    
+    response = requests.get(url, headers=headers)
+    return response
 
-@app.list_resources()
-async def list_resources() -> List[Resource]:
-    """List all available GTM Labs resources"""
-    resources = []
+def fetch_file_from_github(owner: str, repo: str, path: str) -> Dict:
+    """Fetch a single file from GitHub"""
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+    response = github_request(url)
     
-    # Scan components
-    components = scan_components()
-    
-    for category, files in components.items():
-        for file_path in files:
-            name = file_path.stem
-            uri = f"gtm-labs://components/{category}/{name}"
-            
-            resources.append(Resource(
-                uri=uri,
-                name=f"{category}/{name}",
-                mimeType="text/typescript",
-                description=f"Component: {name} from {category}"
-            ))
-    
-    # Add config files
-    config_files = [
-        ("tailwind.config.ts", "Config: Tailwind configuration"),
-        ("next.config.ts", "Config: Next.js configuration"),
-        ("package.json", "Config: Package dependencies"),
-    ]
-    
-    for file_name, description in config_files:
-        file_path = HOMEPAGE_ROOT / file_name
-        if file_path.exists():
-            resources.append(Resource(
-                uri=f"gtm-labs://config/{file_name}",
-                name=file_name,
-                mimeType="application/json" if file_name.endswith(".json") else "text/typescript",
-                description=description
-            ))
-    
-    # Add design tokens
-    if LIB_DIR.exists():
-        for lib_file in LIB_DIR.glob("*.ts"):
-            if not should_exclude_file(lib_file):
-                resources.append(Resource(
-                    uri=f"gtm-labs://lib/{lib_file.stem}",
-                    name=lib_file.stem,
-                    mimeType="text/typescript",
-                    description=f"Library: {lib_file.stem}"
-                ))
-    
-    # Add scaffolds
-    resources.append(Resource(
-        uri="gtm-labs://scaffolds/nextjs-full-project",
-        name="nextjs-full-project",
-        mimeType="application/json",
-        description="Scaffold: Full Next.js project with GTM Labs structure"
-    ))
-    
-    return resources
-
-
-@app.read_resource()
-async def read_resource(uri: str) -> str:
-    """Read a specific resource"""
-    parts = uri.replace("gtm-labs://", "").split("/")
-    
-    if parts[0] == "components":
-        # components/{category}/{name}
-        category = parts[1]
-        name = parts[2]
+    if response.status_code == 200:
+        data = response.json()
         
-        # Find the component file
-        components = scan_components()
-        if category in components:
-            for file_path in components[category]:
-                if file_path.stem == name:
-                    content = file_path.read_text()
-                    return redact_content(content)
-    
-    elif parts[0] == "config":
-        file_name = parts[1]
-        file_path = HOMEPAGE_ROOT / file_name
-        if file_path.exists():
-            content = file_path.read_text()
-            return redact_content(content)
-    
-    elif parts[0] == "lib":
-        lib_name = parts[1]
-        file_path = LIB_DIR / f"{lib_name}.ts"
-        if file_path.exists():
-            content = file_path.read_text()
-            return redact_content(content)
-    
-    elif parts[0] == "scaffolds":
-        # Return scaffold template
-        return json.dumps({
-            "scaffold": parts[1],
-            "message": "Use the create_scaffold tool to generate this scaffold"
-        }, indent=2)
-    
-    return "Resource not found"
+        # Decode base64 content
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        
+        return {
+            "name": data["name"],
+            "path": data["path"],
+            "content": content,
+            "sha": data["sha"],
+            "url": data["html_url"],
+            "size": data["size"]
+        }
+    elif response.status_code == 404:
+        raise Exception(f"File not found: {path}")
+    elif response.status_code == 403:
+        raise Exception("GitHub API rate limit exceeded. Add a GitHub token to your config for higher limits.")
+    else:
+        raise Exception(f"GitHub API error: {response.status_code} - {response.text}")
 
+def list_directory_from_github(owner: str, repo: str, path: str = "") -> List[Dict]:
+    """List contents of a directory from GitHub"""
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+    response = github_request(url)
+    
+    if response.status_code == 200:
+        return response.json()
+    elif response.status_code == 404:
+        return []
+    elif response.status_code == 403:
+        raise Exception("GitHub API rate limit exceeded. Add a GitHub token to your config for higher limits.")
+    else:
+        raise Exception(f"GitHub API error: {response.status_code}")
 
+def scan_components_from_github(owner: str, repo: str, base_path: str = "homepage/components") -> List[Dict]:
+    """Recursively scan all components from a GitHub repo"""
+    components = []
+    
+    try:
+        items = list_directory_from_github(owner, repo, base_path)
+        
+        for item in items:
+            if item["type"] == "file":
+                # Include .tsx, .ts, .jsx, .js files
+                if any(item["name"].endswith(ext) for ext in [".tsx", ".ts", ".jsx", ".js"]):
+                    components.append({
+                        "name": item["name"].rsplit(".", 1)[0],  # Remove extension
+                        "path": item["path"],
+                        "url": item["html_url"],
+                        "type": "file",
+                        "category": Path(item["path"]).parent.name
+                    })
+            elif item["type"] == "dir":
+                # Recursively scan subdirectories
+                sub_components = scan_components_from_github(owner, repo, item["path"])
+                components.extend(sub_components)
+    except Exception as e:
+        print(f"Warning: Could not scan {base_path}: {e}", file=sys.stderr)
+    
+    return components
+
+def get_component_with_dependencies(owner: str, repo: str, component_path: str) -> Dict:
+    """Get a component and analyze its dependencies"""
+    # Fetch the main component
+    component = fetch_file_from_github(owner, repo, component_path)
+    
+    # Parse imports to find dependencies
+    import_pattern = r'import\s+.*?\s+from\s+[\'"](.+?)[\'"]'
+    imports = []
+    
+    for match in re.finditer(import_pattern, component["content"]):
+        import_path = match.group(1)
+        
+        # Only include relative imports (local dependencies)
+        if import_path.startswith("."):
+            imports.append(import_path)
+    
+    # Fetch dependencies
+    dependencies = []
+    component_dir = Path(component_path).parent
+    
+    for import_path in imports:
+        try:
+            # Resolve relative path
+            if import_path.startswith("./"):
+                dep_path = component_dir / import_path[2:]
+            elif import_path.startswith("../"):
+                dep_path = component_dir / import_path
+            else:
+                continue
+            
+            # Add .tsx if no extension
+            if not dep_path.suffix:
+                dep_path = dep_path.with_suffix(".tsx")
+            
+            # Fetch dependency
+            dep = fetch_file_from_github(owner, repo, str(dep_path))
+            dependencies.append(dep)
+        except Exception as e:
+            print(f"Warning: Could not fetch dependency {import_path}: {e}", file=sys.stderr)
+    
+    return {
+        "component": component,
+        "dependencies": dependencies,
+        "import_count": len(imports)
+    }
+
+import re
+
+# MCP Tool Definitions
 @app.list_tools()
 async def list_tools() -> List[Tool]:
-    """List all available tools"""
+    """List available MCP tools"""
     return [
         Tool(
             name="list_components",
-            description="List all available components, optionally filtered by category or version",
+            description="List all available components from GTM Labs projects. Returns component names, paths, and categories.",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "Project name to list components from",
+                        "enum": list(GITHUB_REPOS.keys())
+                    },
                     "category": {
                         "type": "string",
-                        "description": "Filter by category: sections, navigation, animations, ui, cosmic, magicui, experiments",
-                        "enum": ["sections", "navigation", "animations", "ui", "cosmic", "magicui", "experiments", "all"]
-                    },
-                    "version": {
-                        "type": "string",
-                        "description": "Optional: specific Git tag or commit hash"
+                        "description": "Optional: Filter by category (ui, sections, animations, etc.)"
                     }
                 }
             }
         ),
         Tool(
             name="get_component",
-            description="Get a specific component with full blueprint (includes dependencies, specs, and code)",
+            description="Get a specific component with its full code and dependencies. Always returns the latest version from GitHub.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Component name (e.g., 'hero-section', 'how-we-help-section')"
+                        "description": "Component name (e.g., 'pricing-section', 'hero-section')"
                     },
-                    "version": {
+                    "project": {
                         "type": "string",
-                        "description": "Optional: Git tag, commit hash, or 'latest' (default: latest)"
+                        "description": "Project name",
+                        "enum": list(GITHUB_REPOS.keys()),
+                        "default": "homepage"
                     },
                     "include_dependencies": {
                         "type": "boolean",
-                        "description": "Include all dependent files (default: true)"
+                        "description": "Include all component dependencies",
+                        "default": True
                     }
                 },
                 "required": ["name"]
-            }
-        ),
-        Tool(
-            name="get_component_specs",
-            description="Get detailed specifications for a component (colors, animations, borders, spacing, fonts)",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Component name"
-                    },
-                    "property": {
-                        "type": "string",
-                        "description": "Optional: specific property (colors, animations, borders, spacing, fonts)",
-                        "enum": ["colors", "animations", "borders", "spacing", "fonts", "all"]
-                    }
-                },
-                "required": ["name"]
-            }
-        ),
-        Tool(
-            name="get_changelog",
-            description="Get version history and changelog for a component or entire project",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "component": {
-                        "type": "string",
-                        "description": "Optional: specific component name (omit for project-wide changelog)"
-                    },
-                    "version_range": {
-                        "type": "string",
-                        "description": "Optional: version range (e.g., 'v1.0.0..v1.2.0')"
-                    }
-                }
             }
         ),
         Tool(
             name="search_components",
-            description="Search components by query (name, content, or properties)",
+            description="Search for components across all GTM Labs projects by name or content.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search query"
-                    },
-                    "filters": {
-                        "type": "object",
-                        "description": "Optional filters (category, has_animation, color_scheme, etc.)"
+                        "description": "Search query (searches component names and categories)"
                     }
                 },
                 "required": ["query"]
             }
         ),
         Tool(
-            name="create_scaffold",
-            description="Create a project scaffold with selected components and structure",
+            name="get_design_tokens",
+            description="Get design tokens (colors, spacing, typography, etc.) from a project.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "template": {
+                    "project": {
                         "type": "string",
-                        "description": "Scaffold template: 'nextjs-full-project' or 'landing-page'",
-                        "enum": ["nextjs-full-project", "landing-page"]
-                    },
-                    "components": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of component names to include"
-                    },
-                    "output_path": {
-                        "type": "string",
-                        "description": "Output directory path"
+                        "description": "Project name",
+                        "enum": list(GITHUB_REPOS.keys()),
+                        "default": "homepage"
                     }
-                },
-                "required": ["template", "output_path"]
+                }
             }
         )
     ]
-
 
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> List[TextContent]:
     """Handle tool calls"""
     
-    if name == "list_components":
-        category = arguments.get("category", "all")
-        version = arguments.get("version")
-        
-        components = scan_components()
-        result = {"components": {}}
-        
-        if category == "all":
-            result["components"] = {
-                cat: [str(f.relative_to(COMPONENTS_DIR)) for f in files]
-                for cat, files in components.items()
-            }
-        elif category in components:
-            result["components"][category] = [
-                str(f.relative_to(COMPONENTS_DIR)) for f in components[category]
-            ]
-        
-        if version:
-            result["version"] = version
-            result["note"] = f"Showing components at version: {version}"
-        
-        return [TextContent(
-            type="text",
-            text=json.dumps(result, indent=2)
-        )]
-    
-    elif name == "get_component":
-        component_name = arguments["name"]
-        version = arguments.get("version", "HEAD")
-        include_deps = arguments.get("include_dependencies", True)
-        
-        # Find component file
-        components = scan_components()
-        component_file = None
-        
-        for files in components.values():
-            for file_path in files:
-                if file_path.stem == component_name:
-                    component_file = file_path
-                    break
-            if component_file:
-                break
-        
-        if not component_file:
-            return [TextContent(
-                type="text",
-                text=json.dumps({"error": f"Component '{component_name}' not found"})
-            )]
-        
-        # Get component content
-        content = get_file_at_version(component_file, version)
-        if not content:
-            content = component_file.read_text()
-            content = redact_content(content)
-        
-        result = {
-            "name": component_name,
-            "path": str(component_file.relative_to(PROJECT_ROOT)),
-            "version": version,
-            "content": content,
-            "specs": get_component_specs(component_file)
-        }
-        
-        if include_deps:
-            result["dependencies"] = get_component_dependencies(component_file)
-        
-        return [TextContent(
-            type="text",
-            text=json.dumps(result, indent=2)
-        )]
-    
-    elif name == "get_component_specs":
-        component_name = arguments["name"]
-        property_filter = arguments.get("property", "all")
-        
-        # Find component
-        components = scan_components()
-        component_file = None
-        
-        for files in components.values():
-            for file_path in files:
-                if file_path.stem == component_name:
-                    component_file = file_path
-                    break
-            if component_file:
-                break
-        
-        if not component_file:
-            return [TextContent(
-                type="text",
-                text=json.dumps({"error": f"Component '{component_name}' not found"})
-            )]
-        
-        specs = get_component_specs(component_file)
-        
-        if property_filter != "all":
-            specs = {property_filter: specs.get(property_filter, [])}
-        
-        result = {
-            "component": component_name,
-            "specs": specs
-        }
-        
-        return [TextContent(
-            type="text",
-            text=json.dumps(result, indent=2)
-        )]
-    
-    elif name == "get_changelog":
-        component = arguments.get("component")
-        version_range = arguments.get("version_range")
-        
-        if component:
-            # Find component file
-            components = scan_components()
-            component_file = None
+    try:
+        if name == "list_components":
+            project = arguments.get("project", "homepage")
+            category_filter = arguments.get("category")
             
-            for files in components.values():
-                for file_path in files:
-                    if file_path.stem == component:
-                        component_file = file_path
-                        break
-                if component_file:
-                    break
+            repo_info = GITHUB_REPOS.get(project)
+            if not repo_info:
+                return [TextContent(type="text", text=f"Project '{project}' not found")]
             
-            if not component_file:
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({"error": f"Component '{component}' not found"})
-                )]
+            owner = repo_info["owner"]
+            repo = repo_info["repo"]
             
-            versions = get_git_versions(component_file)
+            # Scan components
+            components = scan_components_from_github(owner, repo)
+            
+            # Filter by category if specified
+            if category_filter:
+                components = [c for c in components if c["category"] == category_filter]
+            
+            # Group by category
+            by_category = {}
+            for comp in components:
+                cat = comp["category"]
+                if cat not in by_category:
+                    by_category[cat] = []
+                by_category[cat].append(comp["name"])
+            
             result = {
-                "component": component,
-                "changelog": versions
+                "project": project,
+                "total_components": len(components),
+                "categories": by_category,
+                "components": components
             }
-        else:
-            # Project-wide changelog (tags)
-            versions = get_git_versions()
-            result = {
-                "project": "gtm-labs",
-                "releases": versions
-            }
+            
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
         
-        if version_range:
-            result["version_range"] = version_range
-        
-        return [TextContent(
-            type="text",
-            text=json.dumps(result, indent=2)
-        )]
-    
-    elif name == "search_components":
-        query = arguments["query"].lower()
-        filters = arguments.get("filters", {})
-        
-        components = scan_components()
-        results = []
-        
-        for category, files in components.items():
-            for file_path in files:
-                name = file_path.stem
+        elif name == "get_component":
+            component_name = arguments["name"]
+            project = arguments.get("project", "homepage")
+            include_deps = arguments.get("include_dependencies", True)
+            
+            repo_info = GITHUB_REPOS.get(project)
+            if not repo_info:
+                return [TextContent(type="text", text=f"Project '{project}' not found")]
+            
+            owner = repo_info["owner"]
+            repo = repo_info["repo"]
+            
+            # Find the component
+            components = scan_components_from_github(owner, repo)
+            matching = [c for c in components if component_name.lower() in c["name"].lower()]
+            
+            if not matching:
+                return [TextContent(type="text", text=f"Component '{component_name}' not found in {project}")]
+            
+            # Get the first match
+            component_info = matching[0]
+            
+            if include_deps:
+                # Get component with dependencies
+                full_component = get_component_with_dependencies(owner, repo, component_info["path"])
                 
-                # Check if query matches name
-                if query in name.lower():
-                    results.append({
-                        "name": name,
-                        "category": category,
-                        "path": str(file_path.relative_to(PROJECT_ROOT))
-                    })
-                # Check content
-                else:
-                    try:
-                        content = file_path.read_text().lower()
-                        if query in content:
-                            results.append({
-                                "name": name,
-                                "category": category,
-                                "path": str(file_path.relative_to(PROJECT_ROOT)),
-                                "match": "content"
-                            })
-                    except Exception:
-                        pass
+                result = {
+                    "name": component_info["name"],
+                    "project": project,
+                    "path": component_info["path"],
+                    "github_url": component_info["url"],
+                    "code": full_component["component"]["content"],
+                    "dependencies": [
+                        {
+                            "name": dep["name"],
+                            "path": dep["path"],
+                            "code": dep["content"]
+                        }
+                        for dep in full_component["dependencies"]
+                    ],
+                    "dependency_count": len(full_component["dependencies"])
+                }
+            else:
+                # Just get the component file
+                component_file = fetch_file_from_github(owner, repo, component_info["path"])
+                
+                result = {
+                    "name": component_info["name"],
+                    "project": project,
+                    "path": component_info["path"],
+                    "github_url": component_info["url"],
+                    "code": component_file["content"]
+                }
+            
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
         
-        return [TextContent(
-            type="text",
-            text=json.dumps({"query": query, "results": results}, indent=2)
-        )]
+        elif name == "search_components":
+            query = arguments["query"].lower()
+            
+            all_results = []
+            
+            # Search across all projects
+            for project, repo_info in GITHUB_REPOS.items():
+                try:
+                    owner = repo_info["owner"]
+                    repo = repo_info["repo"]
+                    components = scan_components_from_github(owner, repo)
+                    
+                    # Search in name and category
+                    matching = [
+                        c for c in components 
+                        if query in c["name"].lower() or query in c["category"].lower()
+                    ]
+                    
+                    for comp in matching:
+                        comp["project"] = project
+                        all_results.append(comp)
+                except Exception as e:
+                    print(f"Warning: Could not search {project}: {e}", file=sys.stderr)
+            
+            result = {
+                "query": query,
+                "total_results": len(all_results),
+                "results": all_results
+            }
+            
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        
+        elif name == "get_design_tokens":
+            project = arguments.get("project", "homepage")
+            
+            repo_info = GITHUB_REPOS.get(project)
+            if not repo_info:
+                return [TextContent(type="text", text=f"Project '{project}' not found")]
+            
+            owner = repo_info["owner"]
+            repo = repo_info["repo"]
+            
+            # Try to fetch design tokens file
+            token_paths = [
+                "homepage/lib/design-tokens.ts",
+                "homepage/lib/tokens.ts",
+                "lib/design-tokens.ts",
+                "lib/tokens.ts"
+            ]
+            
+            for path in token_paths:
+                try:
+                    tokens = fetch_file_from_github(owner, repo, path)
+                    
+                    result = {
+                        "project": project,
+                        "path": path,
+                        "github_url": tokens["url"],
+                        "code": tokens["content"]
+                    }
+                    
+                    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+                except:
+                    continue
+            
+            return [TextContent(type="text", text=f"Design tokens not found in {project}")]
+        
+        else:
+            return [TextContent(type="text", text=f"Unknown tool: {name}")]
     
-    elif name == "create_scaffold":
-        template = arguments["template"]
-        components_list = arguments.get("components", [])
-        output_path = arguments["output_path"]
-        
-        scaffold_data = {
-            "template": template,
-            "output_path": output_path,
-            "structure": {
-                "app/": ["layout.tsx", "page.tsx", "globals.css"],
-                "components/": ["ui/", "cosmic/", "magicui/"],
-                "lib/": ["utils.ts", "design-tokens.ts"],
-                "public/": [],
-            },
-            "configs": [
-                "package.json",
-                "tailwind.config.ts",
-                "next.config.ts",
-                "tsconfig.json"
-            ],
-            "components_to_include": components_list,
-            "note": "Use this data to create the scaffold structure. Copy files from GTM Labs project to output_path."
-        }
-        
-        return [TextContent(
-            type="text",
-            text=json.dumps(scaffold_data, indent=2)
-        )]
-    
-    return [TextContent(
-        type="text",
-        text=json.dumps({"error": "Unknown tool"})
-    )]
-
+    except Exception as e:
+        error_msg = f"Error: {str(e)}"
+        print(error_msg, file=sys.stderr)
+        return [TextContent(type="text", text=error_msg)]
 
 async def main():
     """Run the MCP server"""
@@ -725,7 +442,6 @@ async def main():
             write_stream,
             app.create_initialization_options()
         )
-
 
 if __name__ == "__main__":
     import asyncio
