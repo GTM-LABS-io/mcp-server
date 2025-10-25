@@ -1,0 +1,5 @@
+{
+  "project_root": "/path/to/your/gtm-labs-project",
+  "_comment": "Update project_root to point to your GTM Labs project directory",
+  "_example": "/Users/yourname/projects/gtm-homepage"
+}
