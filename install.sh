@@ -75,7 +75,7 @@ echo ""
 echo "⬇️  Downloading GTM Labs MCP server..."
 
 # Download from GitHub
-curl -fsSL https://raw.githubusercontent.com/GTM-LABS-io/mcp-server/main/server-github.py \
+curl -fsSL https://raw.githubusercontent.com/GTM-LABS-io/mcp-server/main/server.py \
   -o ~/.mcp-servers/gtm-labs/server.py
 
 if [ $? -eq 0 ]; then
