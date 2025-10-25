@@ -1,58 +1,53 @@
 # GTM Labs MCP Server
 
-> Access your GTM Labs component library via Model Context Protocol
+> Access GTM Labs components directly from GitHub - always up-to-date!
 
-Transform your GTM Labs website into a reusable component library accessible through AI assistants like Claude, Windsurf, and any MCP-compatible tool.
+Get instant access to GTM Labs components through AI assistants. No git clone needed - components are fetched directly from GitHub's API, so you always get the latest version.
 
 ---
 
 ## 🎯 What This Does
 
-The GTM Labs MCP Server exposes your website components, layouts, and design system through the Model Context Protocol, allowing you to:
+The GTM Labs MCP Server fetches components directly from GitHub, allowing you to:
 
 ✅ **Access any component** instantly via natural language  
-✅ **Get full blueprints** with code, dependencies, and specs  
-✅ **Search components** by name, content, or properties  
-✅ **Extract design specs** (colors, animations, borders, etc.)  
-✅ **Create project scaffolds** with your components  
-✅ **Version control** - access any historical version via Git
+✅ **Always get the latest** - no git pull needed!  
+✅ **Get full blueprints** with code and dependencies  
+✅ **Search components** across all projects  
+✅ **Extract design specs** (colors, animations, etc.)  
+✅ **No local storage** - components fetched on demand
 
 ---
 
 ## 🚀 Quick Install
 
-### One-Line Install (Coming Soon)
+### One-Line Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gtm-labs/mcp-server/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/GTM-LABS-io/mcp-server/main/install.sh | bash
 ```
 
-### Manual Install
+That's it! No git clone needed. Components are fetched directly from GitHub.
 
-```bash
-# 1. Install Python 3.10+ (if needed)
-brew install python@3.11  # macOS
-# or
-sudo apt install python3.11  # Linux
+### What Gets Installed
 
-# 2. Install MCP SDK
-pip3.11 install 'mcp[cli]'
+- MCP SDK
+- requests library (for GitHub API)
+- GTM Labs MCP server
+- IDE configuration (Windsurf/Claude Desktop)
 
-# 3. Download and install server
-mkdir -p ~/.mcp-servers/gtm-labs
-curl -o ~/.mcp-servers/gtm-labs/server.py \
-  https://raw.githubusercontent.com/gtm-labs/mcp-server/main/gtm-labs-mcp-portable.py
-chmod +x ~/.mcp-servers/gtm-labs/server.py
+### Optional: GitHub Token
 
-# 4. Configure project path
-mkdir -p ~/.gtm-labs-mcp
-cat > ~/.gtm-labs-mcp/config.json << EOF
+For higher rate limits (5,000 requests/hour instead of 60):
+
+1. Create a token at https://github.com/settings/tokens
+2. No special permissions needed
+3. Add to `~/.gtm-labs-mcp/config.json`:
+
+```json
 {
-  "project_root": "/path/to/your/gtm-labs-project"
+  "github_token": "your_token_here"
 }
-EOF
-
-# 5. Configure your IDE (see below)
 ```
 
 ---

@@ -1,11 +1,12 @@
 #!/bin/bash
 
-# GTM Labs MCP - Public Installation Script
-# This script installs the GTM Labs MCP server for anyone
+# GTM Labs MCP - Public Installation Script (GitHub API Version)
+# This script installs the GTM Labs MCP server
+# Components are fetched directly from GitHub - no git clone needed!
 
 set -e
 
-echo "🚀 Installing GTM Labs MCP Server..."
+echo "🚀 Installing GTM Labs MCP Server (GitHub API Version)..."
 echo ""
 
 # Check Python version
@@ -53,47 +54,66 @@ else
     exit 1
 fi
 
+# Install requests library (for GitHub API)
+echo "📦 Installing requests library..."
+$PIP_CMD install requests --quiet
+
+if [ $? -eq 0 ]; then
+    echo "✅ requests installed"
+else
+    echo "❌ Failed to install requests"
+    exit 1
+fi
+
 # Create directories
 echo ""
 echo "📁 Setting up directories..."
 mkdir -p ~/.mcp-servers/gtm-labs
-mkdir -p ~/.gtm-labs-mcp
 
-# Download the server (replace with actual URL when published)
+# Download the server
 echo ""
 echo "⬇️  Downloading GTM Labs MCP server..."
 
-# For now, copy from local (replace with curl when published)
-if [ -f "gtm-labs-mcp-portable.py" ]; then
-    cp gtm-labs-mcp-portable.py ~/.mcp-servers/gtm-labs/server.py
+# Download from GitHub
+curl -fsSL https://raw.githubusercontent.com/GTM-LABS-io/mcp-server/main/server-github.py \
+  -o ~/.mcp-servers/gtm-labs/server.py
+
+if [ $? -eq 0 ]; then
     chmod +x ~/.mcp-servers/gtm-labs/server.py
     echo "✅ Server installed"
 else
-    echo "❌ Server file not found"
-    echo "Download manually from: https://github.com/gtm-labs/mcp-server"
+    echo "❌ Failed to download server"
+    echo "Visit: https://github.com/GTM-LABS-io/mcp-server"
     exit 1
 fi
 
-# Create config
+# Optional: Create config for GitHub token (for higher rate limits)
 echo ""
-echo "⚙️  Configuration needed..."
+echo "⚙️  Optional: GitHub Token Configuration"
 echo ""
-echo "Where is your GTM Labs project located?"
-echo "Example: /Users/yourname/projects/gtm-homepage"
-read -p "Project path: " PROJECT_PATH
+echo "The MCP fetches components from GitHub's API."
+echo "Without a token: 60 requests/hour"
+echo "With a token: 5,000 requests/hour"
+echo ""
+read -p "Do you want to add a GitHub token? (y/N): " ADD_TOKEN
 
-if [ ! -d "$PROJECT_PATH" ]; then
-    echo "⚠️  Warning: Directory not found: $PROJECT_PATH"
-    echo "You can update this later in ~/.gtm-labs-mcp/config.json"
-fi
-
-cat > ~/.gtm-labs-mcp/config.json << EOF
+if [[ "$ADD_TOKEN" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "Create a token at: https://github.com/settings/tokens"
+    echo "No special permissions needed (public repo access only)"
+    echo ""
+    read -p "Enter your GitHub token: " GITHUB_TOKEN
+    
+    mkdir -p ~/.gtm-labs-mcp
+    cat > ~/.gtm-labs-mcp/config.json << EOF
 {
-  "project_root": "$PROJECT_PATH"
+  "github_token": "$GITHUB_TOKEN"
 }
 EOF
-
-echo "✅ Config saved to ~/.gtm-labs-mcp/config.json"
+    echo "✅ Token saved to ~/.gtm-labs-mcp/config.json"
+else
+    echo "⏭️  Skipping token configuration (you can add it later)"
+fi
 
 # Detect IDE and configure
 echo ""
