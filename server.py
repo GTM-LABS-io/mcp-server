@@ -32,7 +32,7 @@ except ImportError:
 # GitHub configuration - Supports multiple accounts!
 GITHUB_REPOS = {
     # GTM Labs projects (GTM-LABS-io account)
-    "homepage": {"owner": "GTM-LABS-io", "repo": "gtm-homepage"},
+    "website": {"owner": "GTM-LABS-io", "repo": "gtmlabs-website"},
     
     # Personal projects (buildingwithai account)
     # "personal-project": {"owner": "buildingwithai", "repo": "project-name"},
@@ -221,7 +221,7 @@ async def list_tools() -> List[Tool]:
                         "type": "string",
                         "description": "Project name",
                         "enum": list(GITHUB_REPOS.keys()),
-                        "default": "homepage"
+                        "default": "website"
                     },
                     "include_dependencies": {
                         "type": "boolean",
@@ -256,7 +256,7 @@ async def list_tools() -> List[Tool]:
                         "type": "string",
                         "description": "Project name",
                         "enum": list(GITHUB_REPOS.keys()),
-                        "default": "homepage"
+                        "default": "website"
                     }
                 }
             }
@@ -269,7 +269,7 @@ async def call_tool(name: str, arguments: Any) -> List[TextContent]:
     
     try:
         if name == "list_components":
-            project = arguments.get("project", "homepage")
+            project = arguments.get("project", "website")
             category_filter = arguments.get("category")
             
             repo_info = GITHUB_REPOS.get(project)
@@ -305,7 +305,7 @@ async def call_tool(name: str, arguments: Any) -> List[TextContent]:
         
         elif name == "get_component":
             component_name = arguments["name"]
-            project = arguments.get("project", "homepage")
+            project = arguments.get("project", "website")
             include_deps = arguments.get("include_dependencies", True)
             
             repo_info = GITHUB_REPOS.get(project)
@@ -392,7 +392,7 @@ async def call_tool(name: str, arguments: Any) -> List[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
         
         elif name == "get_design_tokens":
-            project = arguments.get("project", "homepage")
+            project = arguments.get("project", "website")
             
             repo_info = GITHUB_REPOS.get(project)
             if not repo_info:
